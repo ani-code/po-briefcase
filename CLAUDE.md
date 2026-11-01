@@ -33,6 +33,17 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 | Bulk delete | Hover a site or time header and click ✕ (asks for confirmation) |
 | Resize panel | Drag its left edge (320–720px) |
 
+### Local files: what works
+Needs **Allow access to file URLs** turned on (see Install). Verified end-to-end by `e2e/local-files.mjs`:
+
+| File type | Chrome shows it as | Po |
+|---|---|---|
+| `.html` | the page | ✓ highlight, comment, restore on refresh |
+| `.md`, `.txt`, `.json` (and other plain text) | raw text in a `<pre>` | ✓ same. Markdown is **not** rendered, you highlight the raw text |
+| `.xml`, `.svg` | XML viewer / image | ✗ Po stays out on purpose (its HTML UI can't go into XML documents) |
+| `.pdf` | Chrome's built-in PDF viewer | ✗ extensions can't reach the PDF's text layer |
+| `.csv`, `.docx`, … | downloaded, not displayed | nothing to highlight |
+
 **Not included (on purpose):** Zara sync, page scrape, image snip/OCR, chat-with-page, YouTube transcripts, options page, diagnostics.
 
 ---
@@ -47,6 +58,7 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 | `background.js` | Service worker. (1) `OPEN_URL` from the panel → `chrome.tabs.update` on that tab. Returns `file_access_off` if a `file://` URL is requested without file access, and the panel shows a notice. (2) Toolbar icon click sends `TOGGLE_PANEL` to the tab. If the tab has no live content script (opened before install or reload), it injects `styles.css` + `content.js` via `activeTab`, then toggles |
 | `styles.css` | Po's styles trimmed to spans, widget, popup and panel (sage `#2d7d5e` accent, light UI) |
 | `test.html` | In-browser test suite against the real `content.js` (see Testing) |
+| `e2e/local-files.mjs` + `e2e/fixtures/` | End-to-end reload test on real local files in real Chrome (see Testing) |
 | `images/po_webhighter_ext.png` | Icon |
 
 ### Data model: `chrome.storage.local`
@@ -65,6 +77,8 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 3. **Find the text again:** `findRangeInTextNodes()` searches the XPath parent first, then the whole `<body>`. It matches within one text node, then across concatenated nodes. Non-breaking and other Unicode spaces count as normal spaces.
 4. **Late content:** if the text isn't on the page yet, it retries after 1s, 2.5s, 5s and 10s.
 5. **SPAs / dynamic pages:** a `MutationObserver` (debounced 1.2s, ignoring the extension's own UI) re-runs restore when the page changes.
+
+**Timing trap (fixed 2026-11-01):** `init()` awaits storage (palette, pending scroll) before deciding whether to restore. Small local files finish loading during those awaits, so a `readyState` captured at script start is stale. Waiting for a `load` event that had already fired meant **highlights never came back on .md/.txt/.json**. `startRestoreWhenLoaded()` re-checks `document.readyState` at decision time. Don't move that check back above the awaits.
 
 **Known limitation:** restore is text-based. If the page's text changes, the highlight can't be placed. It stays in the panel (and storage) but won't appear on the page. If the same text appears twice, the first occurrence gets highlighted.
 
@@ -92,14 +106,15 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 
 ## Testing
 
-- **Automated:** open `test.html` in Chrome and it runs automatically. Expect **29/29 passed**. It loads the real `content.js` (nothing is copied into the test) with an in-memory `chrome.storage`, and covers: `pageKey`, `extractDomain`, grouping by subdomain and time, text matching (single node, across elements, nbsp, miss), wrap/unwrap round-trip, storage add/update/remove plus concurrent writes, **refresh restore** (comment, colour, `#fragment`, resolved state, late-rendered content via retry), delete, edit, panel rendering and search, pending-scroll targeting, the **Local files** group (grouping, file name, search, opening via the background with the scroll queued, file-access-off notice) and **colours** (save, recolour existing highlights and on-page spans, reset, invalid stored palette).
+- **Automated:** open `test.html` in Chrome and it runs automatically. Expect **31/31 passed**. It loads the real `content.js` (nothing is copied into the test) with an in-memory `chrome.storage`, and covers: `pageKey`, `extractDomain`, grouping by subdomain and time, text matching (single node, across elements, nbsp, miss), wrap/unwrap round-trip, storage add/update/remove plus concurrent writes, **refresh restore** (comment, colour, `#fragment`, resolved state, late-rendered content via retry), delete, edit, panel rendering and search, pending-scroll targeting, the **Local files** group (grouping, file name, search, opening via the background with the scroll queued, file-access-off notice) and **colours** (save, recolour existing highlights and on-page spans, reset, invalid stored palette), and the **restore-timing race** plus the HTML-only document check.
+- **End-to-end on real local files:** `node e2e/local-files.mjs` (Node 22+, Google Chrome). For each fixture in `e2e/fixtures/` (html, md, txt, json, xml, svg), real Chrome opens it from `file://`, the real `content.js` runs, a highlight with a comment is saved, the page is **reloaded**, and the highlight must come back. XML and SVG must be left alone without errors. `chrome.*` is a stand-in because branded Chrome won't load unpacked extensions headlessly. Its only network use is Chrome's local DevTools port.
 - **Headless run** (no clicking):
   ```bash
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu \
     --user-data-dir=/tmp/po-test-prof --virtual-time-budget=30000 \
     --dump-dom "file://$PWD/test.html" 2>/dev/null | grep -o 'summary" class="[a-z]*">[^<]*'
   ```
-- **No-network guard:** this must print nothing except the `chromewebstore` string check in `background.js`:
+- **No-network guard** (extension files only; `e2e/` talks to the local DevTools port by design). This must print nothing except the `chromewebstore` string check in `background.js`:
   ```bash
   grep -nE "\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|https?://" *.js
   ```

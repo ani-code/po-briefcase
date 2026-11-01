@@ -339,6 +339,27 @@
     nextBackgroundResponse = { ok: true };
   });
 
+  // ---------- all local file types ----------
+  test('restore starts even if the page finished loading while init awaited storage', async () => {
+    resetStore();
+    fixture.innerHTML = '<pre>Plain text file contents for restore.</pre>';
+    const saved = await createHighlightOnFixture('contents for restore', 'md note');
+    fixture.innerHTML = '<pre>Plain text file contents for restore.</pre>';
+    canRestoreHighlights = false;           // stale value captured before load finished
+    assertEq(document.readyState, 'complete');
+    startRestoreWhenLoaded();
+    assert(canRestoreHighlights, 'noticed the page is already loaded');
+    await sleep(900);                       // scheduleHighlightRestore(800)
+    assert(spansFor(saved.id).length > 0, 'restored without a second load event');
+  });
+
+  test('isSupportedDocument: HTML/plain-text pages yes, XML/SVG no', () => {
+    assert(isSupportedDocument(document), 'HTML');
+    assert(isSupportedDocument(document.implementation.createHTMLDocument('t')), 'plain-text views are HTML docs');
+    assert(!isSupportedDocument(new DOMParser().parseFromString('<root><a>x</a></root>', 'text/xml')), 'XML');
+    assert(!isSupportedDocument(new DOMParser().parseFromString('<svg xmlns="http://www.w3.org/2000/svg"><text>x</text></svg>', 'image/svg+xml')), 'SVG');
+  });
+
   // ---------- colour setup ----------
   test('palette: changing a colour saves it, recolours old highlights, updates the widget', async () => {
     resetStore();

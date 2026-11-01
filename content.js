@@ -236,12 +236,7 @@ async function init() {
   }
 
   await loadPendingScroll();
-
-  if (canRestoreHighlights) {
-    scheduleHighlightRestore(800);
-  } else {
-    window.addEventListener('load', onPageLoadReady, { once: true });
-  }
+  startRestoreWhenLoaded();
 
   // SPA support — ignore mutations caused by the extension's own panel/widget/popup
   if (!mutationObserver) {
@@ -272,6 +267,24 @@ async function init() {
     });
     mutationObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
   }
+}
+
+// Re-check readyState here rather than trusting the value captured at script start: init()
+// awaits storage first, and a small local file (.md/.txt/.json) can finish loading in that
+// gap — waiting for a `load` event that already fired meant highlights never restored.
+function startRestoreWhenLoaded() {
+  if (document.readyState === 'complete') canRestoreHighlights = true;
+  if (canRestoreHighlights) {
+    scheduleHighlightRestore(800);
+  } else {
+    window.addEventListener('load', onPageLoadReady, { once: true });
+  }
+}
+
+// Po's UI is HTML; XML/SVG documents (incl. Chrome's XML viewer) reject it and throw.
+// Local .md/.txt/.json are rendered by Chrome as HTML documents, so they qualify.
+function isSupportedDocument(doc) {
+  return doc instanceof HTMLDocument && !!doc.body;
 }
 
 function onPageLoadReady() {
@@ -1394,7 +1407,7 @@ function findRangeInTextNodes(textNodes, searchText) {
 // BOOTSTRAP — last, so every top-level `let` above is initialized.
 // Skipped when loaded as a plain <script> (test.html): no chrome.runtime.id there.
 // ============================================================
-if (isContextValid() && !hasActiveRuntimeInstance()) {
+if (isContextValid() && isSupportedDocument(document) && !hasActiveRuntimeInstance()) {
   document.addEventListener(RUNTIME_PING_EVENT, respondToRuntimePing);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   chrome.storage.onChanged.addListener(onStorageChanged);
