@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Po Highlighter Tests</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #f5f5f7; color: #1d1d1f; margin: 0; padding: 24px 16px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.sub { color: #6e6e73; margin: 0 0 16px; font-size: 14px; }
+  #summary { font-weight: 700; padding: 12px 14px; border-radius: 12px; background: #fff; border: 1px solid rgba(0,0,0,0.08); margin-bottom: 12px; }
+  #summary.pass { color: #2d7d5e; } #summary.fail { color: #c2415c; }
+  ol#results { background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px; padding: 12px 12px 12px 40px; font-size: 13px; line-height: 1.7; }
+  .ok { color: #2d7d5e; } .bad { color: #c2415c; white-space: pre-wrap; }
+  #fixture { position: absolute; left: -9999px; top: 0; width: 600px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Po Highlighter — tests</h1>
+  <p class="sub">Runs against the real <code>content.js</code> with an in-memory <code>chrome.storage</code>. Open this file in Chrome; tests start automatically.</p>
+  <div id="summary">Running…</div>
+  <ol id="results"></ol>
+</main>
+<div id="fixture"></div>
+
+<script>
+  // In-memory chrome.storage.local stand-in. No runtime.id, so content.js does not bootstrap.
+  const memStore = {};
+  const mockChrome = {
+    runtime: { lastError: undefined, getURL: (p) => p },
+    storage: {
+      local: {
+        get(defaults, cb) {
+          const out = {};
+          for (const [k, v] of Object.entries(defaults)) out[k] = k in memStore ? structuredClone(memStore[k]) : v;
+          setTimeout(() => cb(out), 0);
+        },
+        set(obj, cb) {
+          for (const [k, v] of Object.entries(obj)) memStore[k] = structuredClone(v);
+          setTimeout(() => cb && cb(), 0);
+        },
+      },
+      onChanged: { addListener() {} },
+    },
+  };
+  try { window.chrome = mockChrome; } catch { /* fall through */ }
+  if (window.chrome !== mockChrome) Object.defineProperty(window, 'chrome', { value: mockChrome, configurable: true, writable: true });
+</script>
+<script src="content.js"></script>
+<script>
+  const results = document.getElementById('results');
+  const fixture = document.getElementById('fixture');
+  const tests = [];
+  const test = (name, fn) => tests.push({ name, fn });
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed'); }
+  function assertEq(a, b, msg) { if (a !== b) throw new Error(`${msg || 'not equal'}\n  expected: ${JSON.stringify(b)}\n  actual:   ${JSON.stringify(a)}`); }
+  function resetStore() { for (const k of Object.keys(memStore)) delete memStore[k]; }
+
+  // ---------- pure helpers ----------
+  test('pageKey strips #fragment, keeps query', () => {
+    assertEq(pageKey('https://a.com/x?q=1#sec'), 'https://a.com/x?q=1');
+    assertEq(pageKey('https://a.com/x'), 'https://a.com/x');
+  });
+
+  test('extractDomain keeps subdomain, drops www', () => {
+    assertEq(extractDomain('https://docs.github.com/en'), 'docs.github.com');
+    assertEq(extractDomain('https://www.github.com/'), 'github.com');
+    assertEq(extractDomain('not a url'), 'not a url');
+  });
+
+  test('groupHighlights: subdomains are separate groups, newest first', () => {
+    const now = Date.now();
+    const iso = (msAgo) => new Date(now - msAgo).toISOString();
+    const groups = groupHighlights([
+      { id: '1', url: 'https://github.com/a', timestamp: iso(5000) },
+      { id: '2', url: 'https://docs.github.com/b', timestamp: iso(1000) },
+      { id: '3', url: 'https://www.github.com/c', timestamp: iso(3 * 86400000) },
+    ]);
+    assertEq(groups.map((g) => g.domain).join(','), 'docs.github.com,github.com');
+    const gh = groups.find((g) => g.domain === 'github.com');
+    assertEq(gh.items.map((i) => i.id).join(','), '1,3', 'github.com items newest first');
+    assertEq(gh.buckets.map((b) => b.label).join(','), 'Today,This week');
+  });
+
+  test('groupHighlights: empty input → empty list', () => {
+    assertEq(groupHighlights([]).length, 0);
+  });
+
+  // ---------- text matching ----------
+  test('findRangeInTextNodes: single node', () => {
+    fixture.innerHTML = '<p>The quick brown fox</p>';
+    const r = findRangeInTextNodes(getTextNodes(fixture), 'quick brown');
+    assert(r, 'range found');
+    assertEq(r.toString(), 'quick brown');
+  });
+
+  test('findRangeInTextNodes: across elements', () => {
+    fixture.innerHTML = '<p>Hello <b>bold</b> world</p>';
+    const r = findRangeInTextNodes(getTextNodes(fixture), 'Hello bold world');
+    assert(r, 'range found');
+    assertEq(r.toString(), 'Hello bold world');
+  });
+
+  test('findRangeInTextNodes: non-breaking space in page matches normal space', () => {
+    fixture.innerHTML = '<p>price today</p>';
+    const r = findRangeInTextNodes(getTextNodes(fixture), 'price today');
+    assert(r, 'range found');
+  });
+
+  test('findRangeInTextNodes: missing text / empty needle → null', () => {
+    fixture.innerHTML = '<p>abc</p>';
+    assertEq(findRangeInTextNodes(getTextNodes(fixture), 'xyz'), null);
+    assertEq(findRangeInTextNodes(getTextNodes(fixture), ''), null);
+  });
+
+  test('wrapRange + unwrapHighlightSpans round-trip leaves text unchanged', () => {
+    fixture.innerHTML = '<p>Hello <b>bold</b> world</p>';
+    const before = fixture.innerHTML;
+    const r = findRangeInTextNodes(getTextNodes(fixture), 'lo bold wo');
+    const spans = wrapRange(r, 't-wrap', '#9BB4C0');
+    assertEq(spans.length, 3, 'one span per text node');
+    assertEq(spans.map((s) => s.textContent).join(''), 'lo bold wo');
+    unwrapHighlightSpans('t-wrap');
+    assertEq(fixture.querySelectorAll('span.my-extension-highlight').length, 0);
+    assertEq(fixture.innerHTML, before);
+  });
+
+  // ---------- storage ----------
+  test('storage: add / update / remove round-trip', async () => {
+    resetStore();
+    await addHighlight({ id: 'a', text: 'x', comment: '' });
+    await addHighlight({ id: 'b', text: 'y', comment: '' });
+    const updated = await updateHighlight('a', { comment: 'note' });
+    assertEq(updated.comment, 'note');
+    await removeHighlights(['b']);
+    const all = await getAllHighlights();
+    assertEq(all.length, 1);
+    assertEq(all[0].comment, 'note');
+  });
+
+  test('storage: concurrent writes in one tab are not lost', async () => {
+    resetStore();
+    await Promise.all([1, 2, 3, 4, 5].map((n) => addHighlight({ id: String(n), text: 't' })));
+    assertEq((await getAllHighlights()).length, 5);
+  });
+
+  // ---------- the feature: survive a page refresh ----------
+  async function createHighlightOnFixture(text, comment) {
+    currentRange = findRangeInTextNodes(getTextNodes(fixture), text);
+    assert(currentRange, 'selection range found');
+    selectedColor = DEFAULT_PALETTE[1];
+    ensureUiMounted();
+    commentPopup.innerHTML = `<textarea id="hl-comment-input"></textarea>`;
+    commentPopup.querySelector('#hl-comment-input').value = comment;
+    await saveCurrentHighlight();
+    const all = await getAllHighlights();
+    return all[all.length - 1];
+  }
+
+  test('refresh: saved highlight + comment come back after the DOM is rebuilt', async () => {
+    resetStore();
+    fixture.innerHTML = '<article><p>Alpha beta <em>gamma</em> delta.</p></article>';
+    const saved = await createHighlightOnFixture('beta gamma', 'remember this');
+    assertEq(saved.text, 'beta gamma');
+    assertEq(saved.comment, 'remember this');
+    assertEq(saved.url, window.location.href);
+
+    // Simulate a reload: fresh DOM, highlights only in storage
+    fixture.innerHTML = '<article><p>Alpha beta <em>gamma</em> delta.</p></article>';
+    assertEq(spansFor(saved.id).length, 0);
+    canRestoreHighlights = true;
+    await loadHighlights();
+    const spans = spansFor(saved.id);
+    assert(spans.length > 0, 'highlight restored');
+    assertEq(spans.map((s) => s.textContent).join(''), 'beta gamma');
+    assertEq(spans[0].title, 'remember this', 'comment bound to restored span');
+    assertEq(spans[0].style.backgroundColor !== '', true, 'color applied');
+  });
+
+  test('refresh: restore still works when the URL gains a #fragment', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Fragment safe sentence.</p>';
+    const saved = await createHighlightOnFixture('safe sentence', '');
+    fixture.innerHTML = '<p>Fragment safe sentence.</p>';
+    history.replaceState(null, '', '#section-2');
+    try {
+      await loadHighlights();
+      assert(spansFor(saved.id).length > 0, 'restored with #fragment in URL');
+    } finally {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  });
+
+  test('refresh: resolved highlight restores with resolved style', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Resolved text here.</p>';
+    const saved = await createHighlightOnFixture('Resolved text', '');
+    await updateHighlight(saved.id, { resolved: true });
+    fixture.innerHTML = '<p>Resolved text here.</p>';
+    await loadHighlights();
+    const spans = spansFor(saved.id);
+    assert(spans.length > 0 && spans[0].classList.contains('resolved'), 'resolved class present');
+  });
+
+  test('refresh: late-rendered content is picked up by the retry loop', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Late arriving paragraph.</p>';
+    const saved = await createHighlightOnFixture('arriving paragraph', '');
+    fixture.innerHTML = '<p>loading…</p>';          // content not there yet
+    await loadHighlights();
+    assertEq(spansFor(saved.id).length, 0, 'not restorable yet');
+    setTimeout(() => { fixture.innerHTML = '<p>Late arriving paragraph.</p>'; }, 300);
+    await sleep(RESTORE_RETRY_DELAYS[0] + 300);
+    assert(spansFor(saved.id).length > 0, 'restored by retry');
+  });
+
+  test('delete removes from storage and page', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Delete me please.</p>';
+    const saved = await createHighlightOnFixture('Delete me', '');
+    await deleteHighlight(saved.id);
+    assertEq(spansFor(saved.id).length, 0);
+    assertEq((await getAllHighlights()).length, 0);
+    assertEq(fixture.textContent, 'Delete me please.');
+  });
+
+  test('edit comment persists', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Edit comment target.</p>';
+    const saved = await createHighlightOnFixture('comment target', 'v1');
+    await editHighlight(saved.id, 'v2');
+    assertEq((await getAllHighlights())[0].comment, 'v2');
+    assertEq(spansFor(saved.id)[0].title, 'v2');
+  });
+
+  // ---------- panel ----------
+  test('panel renders site groups and comments', async () => {
+    resetStore();
+    const now = new Date().toISOString();
+    await addHighlight({ id: 'p1', url: 'https://docs.github.com/x', pageTitle: 'Docs', text: 'docs text', comment: 'docs note', color: '#9BB4C0', timestamp: now });
+    await addHighlight({ id: 'p2', url: 'https://github.com/y', pageTitle: 'GH', text: 'gh text', comment: '', color: '#FFCDC9', timestamp: now });
+    refreshSidePanel();
+    await sleep(50);
+    const domains = [...document.querySelectorAll('.hl-group-domain')].map((d) => d.textContent).sort();
+    assertEq(domains.join(','), 'docs.github.com,github.com');
+    assertEq(document.getElementById('hl-panel-total').textContent, '2');
+    assert(document.querySelector('.hl-panel-item[data-id="p1"] .hl-item-comment').textContent.includes('docs note'));
+    assertEq(document.querySelector('.hl-panel-item[data-id="p1"]').dataset.url, 'https://docs.github.com/x');
+  });
+
+  test('panel search filters by comment text', async () => {
+    filterPanel('docs note');
+    assertEq(document.querySelector('.hl-panel-item[data-id="p1"]').style.display, '');
+    assertEq(document.querySelector('.hl-panel-item[data-id="p2"]').style.display, 'none');
+    filterPanel('');
+  });
+
+  test('pending scroll is only consumed by the page it was meant for', async () => {
+    resetStore();
+    memStore[PENDING_SCROLL_KEY] = { id: 'zz', url: 'https://elsewhere.example/', at: Date.now() };
+    pendingScrollId = null;
+    await loadPendingScroll();
+    assertEq(pendingScrollId, null, 'other page: ignored');
+    assert(memStore[PENDING_SCROLL_KEY], 'left for the right tab');
+    memStore[PENDING_SCROLL_KEY] = { id: 'zz', url: window.location.href, at: Date.now() };
+    await loadPendingScroll();
+    assertEq(pendingScrollId, 'zz', 'this page: picked up');
+    assertEq(memStore[PENDING_SCROLL_KEY], null, 'cleared after use');
+    pendingScrollId = null;
+  });
+
+  // ---------- guardrail ----------
+  test('content.js makes no network calls', async () => {
+    const src = await fetch('content.js').then((r) => r.text()).catch(() => null);
+    if (src === null) return; // file:// fetch blocked — covered by the grep in CLAUDE.md
+    assert(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket/.test(src), 'network API found in content.js');
+  });
+
+  (async () => {
+    let passed = 0;
+    for (const t of tests) {
+      const li = document.createElement('li');
+      try {
+        await t.fn();
+        li.className = 'ok'; li.textContent = '✓ ' + t.name; passed++;
+      } catch (e) {
+        li.className = 'bad'; li.textContent = '✗ ' + t.name + ' — ' + e.message;
+      }
+      results.appendChild(li);
+    }
+    fixture.innerHTML = '';
+    const summary = document.getElementById('summary');
+    summary.textContent = `${passed}/${tests.length} passed`;
+    summary.className = passed === tests.length ? 'pass' : 'fail';
+    document.body.dataset.result = passed === tests.length ? 'PASS' : 'FAIL';
+  })();
+</script>
+</body>
+</html>

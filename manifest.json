@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Po Highlighter",
+  "version": "1.0",
+  "description": "Highlight text, add comments, and browse every highlight by site. Stored locally in this Chrome profile — no network calls.",
+  "icons": {
+    "16": "images/po_webhighter_ext.png",
+    "32": "images/po_webhighter_ext.png",
+    "48": "images/po_webhighter_ext.png",
+    "128": "images/po_webhighter_ext.png"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "Toggle Highlights Panel",
+    "default_icon": {
+      "16": "images/po_webhighter_ext.png",
+      "32": "images/po_webhighter_ext.png",
+      "48": "images/po_webhighter_ext.png",
+      "128": "images/po_webhighter_ext.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "images/po_webhighter_ext.png"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
