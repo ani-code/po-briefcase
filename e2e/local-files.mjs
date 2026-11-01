@@ -1,6 +1,6 @@
 // End-to-end check: highlight + comment on real local files survive a reload.
 //
-//   node e2e/local-files.mjs          (from the repo root; needs Node 22+ and Google Chrome)
+//   npm run test:local          (Node 22+; uses Chrome for Testing installed by `npm install`)
 //
 // Real Chrome renders each fixture from file://, the real content.js runs in the page, a
 // highlight is saved, the page is reloaded, and we check it came back with its comment.
@@ -15,7 +15,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES = join(ROOT, 'e2e', 'fixtures');
-const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+import puppeteer from 'puppeteer';
+
+// Chrome for Testing from `npm install` (override with CHROME=/path/to/chrome)
+const CHROME = process.env.CHROME || await puppeteer.executablePath();
 const PORT = 9333;
 
 // [file, phrase to highlight, expect Po to run?]

@@ -33,6 +33,43 @@ let restoreTimeoutId = null;
 let globalListenersAttached = false;
 let pendingScrollId = null;
 
+// ---- Frames ----
+// Po runs in the top page, and in "inline" frames whose document has no address of its own
+// (about:srcdoc / about:blank / data: / blob:). Document viewers like OneDrive render HTML that
+// way. Highlights made in an inline frame are saved under the TOP page's URL (asked for via
+// background.js), so each viewed document keeps its own highlights. Other frames (ads, embeds)
+// are left alone.
+const IS_TOP_FRAME = window === window.top;
+let framePage = null; // { url, title } of the top page, resolved at init in inline frames
+
+function frameRole(isTop, href) {
+  if (isTop) return 'top';
+  if (/^(about:(srcdoc|blank)|data:|blob:)/.test(String(href || ''))) return 'inline';
+  return 'none';
+}
+
+/** The URL highlights on this page are stored under. */
+function currentPageUrl() {
+  return IS_TOP_FRAME ? window.location.href : (framePage?.url || window.location.href);
+}
+
+async function resolveFramePage() {
+  // The top frame's content script may still be starting — retry briefly.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const info = await chrome.runtime.sendMessage({ type: 'GET_PAGE_INFO_FOR_FRAME' });
+      if (info?.ok && info.url) {
+        framePage = { url: info.url, title: info.title || '' };
+        return true;
+      }
+    } catch { /* background asleep or top not ready — retry */ }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // Without the top URL every viewed doc would share "about:srcdoc" — better to stay off.
+  console.warn('[Po] could not identify the page this frame belongs to; highlighting is off in this frame');
+  return false;
+}
+
 // Persist expanded state across panel refreshes
 const expandedDomains = new Set();
 const expandedBuckets = new Set();
@@ -225,6 +262,7 @@ function getUiHost() {
 // INIT
 // ============================================================
 async function init() {
+  if (!IS_TOP_FRAME && !(await resolveFramePage())) return;
   const host = getUiHost();
   if (!host) return;
 
@@ -306,12 +344,15 @@ function mountUi() {
   host.replaceChildren();
   buildColorWidget();
   buildCommentPopup();
-  buildSidePanel();
-  updatePanelState();
+  if (IS_TOP_FRAME) { // one panel per tab, on the top page
+    buildSidePanel();
+    updatePanelState();
+  }
 }
 
 function ensureUiMounted() {
-  if (!getUiHost()?.isConnected || !colorWidget?.isConnected || !commentPopup?.isConnected || !sidePanel?.isConnected) {
+  if (!getUiHost()?.isConnected || !colorWidget?.isConnected || !commentPopup?.isConnected ||
+      (IS_TOP_FRAME && !sidePanel?.isConnected)) {
     mountUi();
   }
 }
@@ -327,8 +368,21 @@ function shouldHandleToggle(ts) {
   return true;
 }
 
-function onRuntimeMessage(msg) {
+function onRuntimeMessage(msg, sender, sendResponse) {
   if (!msg || !msg.type) return;
+
+  // An inline frame asking (via background.js, frameId 0) which page it belongs to
+  if (msg.type === 'GET_PAGE_INFO') {
+    if (IS_TOP_FRAME) sendResponse({ url: window.location.href, title: document.title });
+    return;
+  }
+  // Panel click for a highlight that lives inside a frame on this page
+  if (msg.type === 'SCROLL_TO') {
+    if (spansFor(msg.id).length > 0) scrollToHighlight(msg.id);
+    return;
+  }
+
+  if (!IS_TOP_FRAME) return;
   if (!shouldHandleToggle(msg.ts)) return;
 
   if (msg.type === 'TOGGLE_PANEL') {
@@ -612,8 +666,8 @@ async function saveCurrentHighlight() {
   const xpath = getXPath(spans[0].parentElement);
   const data = {
     id,
-    url: window.location.href,
-    pageTitle: document.title,
+    url: currentPageUrl(),
+    pageTitle: IS_TOP_FRAME ? document.title : (framePage?.title || document.title),
     comment,
     text: originalText,
     xpath,
@@ -622,6 +676,7 @@ async function saveCurrentHighlight() {
     timestamp: new Date().toISOString(),
     isMultiSpan: spans.length > 1,
   };
+  if (!IS_TOP_FRAME) data.inFrame = true;
 
   try {
     await addHighlight(data);
@@ -792,8 +847,9 @@ async function loadHighlights() {
     return;
   }
 
-  const here = pageKey(window.location.href);
-  highlights.filter((h) => pageKey(h.url) === here).forEach(data => {
+  // The top page restores its own highlights; inline frames restore the ones made in a frame
+  const here = pageKey(currentPageUrl());
+  highlights.filter((h) => pageKey(h.url) === here && !!h.inFrame === !IS_TOP_FRAME).forEach(data => {
     const spans = spansFor(data.id);
     if (spans.length > 0) {
       hydrateExistingHighlight(spans, data);
@@ -842,7 +898,8 @@ async function loadPendingScroll() {
     const pending = result[PENDING_SCROLL_KEY];
     if (!pending) return;
     const fresh = Date.now() - (pending.at || 0) < PENDING_SCROLL_TTL_MS;
-    if (fresh && pageKey(pending.url) !== pageKey(window.location.href)) return; // meant for another tab/page
+    // Meant for another tab/page, or for the other context (top page vs. inline frame) of this page
+    if (fresh && (pageKey(pending.url) !== pageKey(currentPageUrl()) || !!pending.inFrame === IS_TOP_FRAME)) return;
     if (fresh) pendingScrollId = pending.id;
     await storageLocalSet({ [PENDING_SCROLL_KEY]: null });
   } catch { /* storage unavailable — just don't auto-scroll */ }
@@ -860,13 +917,18 @@ function isLocalFile(url) {
 
 // Navigation goes through background.js (chrome.tabs.update): a web page is not allowed
 // to open file:// URLs itself, but the extension is (once file access is allowed).
-async function openHighlight(id, url) {
+async function openHighlight(id, url, inFrame = false) {
   if (pageKey(url) === pageKey(window.location.href)) {
-    scrollToHighlight(id);
+    if (!inFrame) {
+      scrollToHighlight(id);
+      return;
+    }
+    // The highlight lives in a frame (e.g. OneDrive's viewer) — ask every frame in this tab
+    try { await chrome.runtime.sendMessage({ type: 'SCROLL_TO_IN_TAB', id }); } catch { /* ignore */ }
     return;
   }
   try {
-    await storageLocalSet({ [PENDING_SCROLL_KEY]: { id, url, at: Date.now() } });
+    await storageLocalSet({ [PENDING_SCROLL_KEY]: { id, url, at: Date.now(), inFrame: !!inFrame } });
   } catch { /* navigate anyway; just no auto-scroll */ }
 
   let response = null;
@@ -1141,7 +1203,7 @@ function refreshSidePanel() {
     body.querySelectorAll('.hl-panel-item').forEach(item => {
       item.addEventListener('click', (e) => {
         if (e.target.closest('.hl-item-delete')) return;
-        openHighlight(item.dataset.id, item.dataset.url);
+        openHighlight(item.dataset.id, item.dataset.url, item.dataset.inFrame === 'true');
       });
     });
 
@@ -1204,6 +1266,7 @@ function buildPanelItem(data) {
     <div class="hl-panel-item ${data.resolved ? 'hl-item-resolved' : ''}"
          data-id="${escapeHtml(data.id)}"
          data-url="${escapeHtml(data.url)}"
+         data-in-frame="${data.inFrame ? 'true' : 'false'}"
          data-text="${escapeHtml(searchText)}"
          data-domain="${escapeHtml(groupKey(data.url))}"
          title="${escapeHtml(tooltip)}">
@@ -1407,7 +1470,8 @@ function findRangeInTextNodes(textNodes, searchText) {
 // BOOTSTRAP — last, so every top-level `let` above is initialized.
 // Skipped when loaded as a plain <script> (test.html): no chrome.runtime.id there.
 // ============================================================
-if (isContextValid() && isSupportedDocument(document) && !hasActiveRuntimeInstance()) {
+if (isContextValid() && isSupportedDocument(document) &&
+    frameRole(IS_TOP_FRAME, window.location.href) !== 'none' && !hasActiveRuntimeInstance()) {
   document.addEventListener(RUNTIME_PING_EVENT, respondToRuntimePing);
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
   chrome.storage.onChanged.addListener(onStorageChanged);

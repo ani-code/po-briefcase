@@ -1,0 +1,15 @@
+{
+  "name": "po-briefcase",
+  "private": true,
+  "description": "Po Highlighter test tooling. The extension itself has no build step and no dependencies.",
+  "type": "module",
+  "scripts": {
+    "test": "node e2e/run-all.mjs",
+    "test:unit": "node e2e/unit.mjs",
+    "test:local": "node e2e/local-files.mjs",
+    "test:extension": "node e2e/extension.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "25.14.0"
+  }
+}

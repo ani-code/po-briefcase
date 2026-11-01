@@ -11,9 +11,10 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 - So this folder is a **standalone extract** of Po's highlight, comment and panel code with every network and Zara path removed. It was extracted on 2026-11-01 from `my-web-highlighter` commit `0516c52`. The highlight and restore logic is copied, not rewritten, because it was already proven in daily use.
 
 ### Hard rules for this project
-1. **No network, ever.** No `fetch`, XHR, WebSocket, `sendBeacon`, no `host_permissions`, no remote scripts or fonts. This is a work machine and the data stays in the browser. `test.html` and the grep below enforce it.
+1. **No network, ever.** No `fetch`, XHR, WebSocket, `sendBeacon`, no `host_permissions`, no remote scripts or fonts. This is a work machine and the data stays in the browser. `npm test` enforces it (no-network guard).
 2. **Local storage only**: `chrome.storage.local`. No sync storage, no backend.
 3. Keep it small. If a feature needs a server, it doesn't belong here.
+4. **`npm test` must pass before every commit.** Add a test with every change (see Testing).
 
 ---
 
@@ -32,6 +33,14 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 | Search | Panel search box filters by highlighted text, comment, page title, site or file name |
 | Bulk delete | Hover a site or time header and click ✕ (asks for confirmation) |
 | Resize panel | Drag its left edge (320–720px) |
+
+### OneDrive (and other document viewers)
+OneDrive shows an uploaded `.html` file inside a **sandboxed `about:srcdoc` iframe**, nested in a viewer iframe from another origin. (Confirmed on the work Mac: right-click the doc, then **View frame source** gives `view-source:about:srcdoc`.) `.md` files on OneDrive render in the main page and always worked.
+- Po runs in the top page **and** in "inline" frames (`about:srcdoc`, `about:blank`, `data:`, `blob:`). See `frameRole()`. Ordinary `http(s)` subframes (ads, embeds) are ignored: no UI, no listeners.
+- An inline frame has no address of its own, so it asks for the **top page's URL** (`GET_PAGE_INFO_FOR_FRAME`, relayed by `background.js` to the top frame's content script at `frameId 0`) and saves highlights under it with `inFrame: true`. Each OneDrive doc URL (`…onedrive.aspx?id=…/doc.html`) keeps its own highlights. If the top URL can't be resolved, Po stays **off** in that frame rather than saving under `about:srcdoc`, which every doc would share.
+- The top page restores only `!inFrame` highlights; frames restore only `inFrame` ones.
+- **One panel per tab, on the top page.** Clicking a frame highlight on the same page sends `SCROLL_TO_IN_TAB`, which background broadcasts so every frame checks for it. From another page, it navigates and a `pendingScroll` with `inFrame: true` is consumed only by the frame.
+- Manifest: `all_frames: true` + `match_origin_as_fallback: true` (needed to inject into sandboxed `about:srcdoc` frames).
 
 ### Local files: what works
 Needs **Allow access to file URLs** turned on (see Install). Verified end-to-end by `e2e/local-files.mjs`:
@@ -53,12 +62,16 @@ Needs **Allow access to file URLs** turned on (see Install). Verified end-to-end
 ### Files
 | File | Role |
 |---|---|
-| `manifest.json` | MV3. Permissions: `storage`, `activeTab`, `scripting`. **No `host_permissions`.** The content script runs on `<all_urls>` |
+| `manifest.json` | MV3. Permissions: `storage`, `activeTab`, `scripting`. **No `host_permissions`.** The content script runs on `<all_urls>`, in all frames (`all_frames`, `match_origin_as_fallback`). `content.js` decides where it actually starts |
 | `content.js` | Everything: selection widget, comment popup, highlight wrap/restore, side panel, storage helpers. Bootstrap is at the **bottom** of the file |
 | `background.js` | Service worker. (1) `OPEN_URL` from the panel → `chrome.tabs.update` on that tab. Returns `file_access_off` if a `file://` URL is requested without file access, and the panel shows a notice. (2) Toolbar icon click sends `TOGGLE_PANEL` to the tab. If the tab has no live content script (opened before install or reload), it injects `styles.css` + `content.js` via `activeTab`, then toggles |
 | `styles.css` | Po's styles trimmed to spans, widget, popup and panel (sage `#2d7d5e` accent, light UI) |
 | `test.html` | In-browser test suite against the real `content.js` (see Testing) |
-| `e2e/local-files.mjs` + `e2e/fixtures/` | End-to-end reload test on real local files in real Chrome (see Testing) |
+| `package.json`, `.puppeteerrc.cjs` | **Test tooling only** (Puppeteer + Chrome for Testing, cached in `.cache/`, git-ignored). The extension itself has no dependencies or build step |
+| `e2e/run-all.mjs` | `npm test`: no-network guard plus the three suites below |
+| `e2e/unit.mjs` | Runs `test.html` headless |
+| `e2e/local-files.mjs` + `e2e/fixtures/` | Real local files in real Chrome: highlight, reload, restored |
+| `e2e/extension.mjs` | **Real extension** in Chrome for Testing: top page, OneDrive-style sandboxed srcdoc viewer, ad frames, panel, cross-page navigation |
 | `images/po_webhighter_ext.png` | Icon |
 
 ### Data model: `chrome.storage.local`
@@ -106,22 +119,24 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 
 ## Testing
 
-- **Automated:** open `test.html` in Chrome and it runs automatically. Expect **31/31 passed**. It loads the real `content.js` (nothing is copied into the test) with an in-memory `chrome.storage`, and covers: `pageKey`, `extractDomain`, grouping by subdomain and time, text matching (single node, across elements, nbsp, miss), wrap/unwrap round-trip, storage add/update/remove plus concurrent writes, **refresh restore** (comment, colour, `#fragment`, resolved state, late-rendered content via retry), delete, edit, panel rendering and search, pending-scroll targeting, the **Local files** group (grouping, file name, search, opening via the background with the scroll queued, file-access-off notice) and **colours** (save, recolour existing highlights and on-page spans, reset, invalid stored palette), and the **restore-timing race** plus the HTML-only document check.
-- **End-to-end on real local files:** `node e2e/local-files.mjs` (Node 22+, Google Chrome). For each fixture in `e2e/fixtures/` (html, md, txt, json, xml, svg), real Chrome opens it from `file://`, the real `content.js` runs, a highlight with a comment is saved, the page is **reloaded**, and the highlight must come back. XML and SVG must be left alone without errors. `chrome.*` is a stand-in because branded Chrome won't load unpacked extensions headlessly. Its only network use is Chrome's local DevTools port.
-- **Headless run** (no clicking):
-  ```bash
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu \
-    --user-data-dir=/tmp/po-test-prof --virtual-time-budget=30000 \
-    --dump-dom "file://$PWD/test.html" 2>/dev/null | grep -o 'summary" class="[a-z]*">[^<]*'
-  ```
-- **No-network guard** (extension files only; `e2e/` talks to the local DevTools port by design). This must print nothing except the `chromewebstore` string check in `background.js`:
-  ```bash
-  grep -nE "\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|https?://" *.js
-  ```
-- **Manual smoke test after any change:** reload the extension at `chrome://extensions` and refresh a real article page. Highlight something with a comment and refresh: it should still be there. Open the panel and check it's under the right site. Go to another site, click the item in the panel: the original page should open and scroll to it.
-- **Add a test to `test.html` with every change.** The `test(name, async fn)`, `assert` and `assertEq` helpers are at the top of the last `<script>`. Test the behaviour itself (e.g. "restored span exists with the comment"), not a stand-in for it.
+**One command, run before every commit:**
+```bash
+npm install   # first time only: Puppeteer + Chrome for Testing (~600 MB into .cache/, git-ignored)
+npm test      # ~1.5 min; exit code 0 = safe to commit
+```
+It runs four things (each also on its own via `npm run test:unit|test:local|test:extension`):
 
----
+| Suite | What it proves |
+|---|---|
+| **no-network guard** | `content.js` and `background.js` contain no `fetch`/XHR/WebSocket/`sendBeacon`/`EventSource`, and the manifest has no `host_permissions` |
+| **unit** (`test.html`, 33 tests) | Logic against the real `content.js` with an in-memory `chrome.storage`: page keys, site and Local-files grouping, text matching, wrap/unwrap, storage, refresh restore (comment, colour, `#fragment`, resolved, late content), restore-timing race, HTML-only documents, `frameRole`, panel render and search, pending scroll, local-file opening, colours. Also openable by hand in Chrome |
+| **local files** (6 fixtures) | Real Chrome opens html/md/txt/json from `file://`, saves a highlight with a comment, **reloads**, and it must be restored. XML/SVG must be left alone. (`chrome.*` is a stand-in here; file access can't be toggled in automation) |
+| **extension** (10 tests) | The **real unpacked extension** in Chrome for Testing, driven through the page's DOM: top-page highlight + reload; ad iframe ignored; **OneDrive mock** (top page, cross-origin viewer, sandboxed `about:srcdoc` doc): highlight in the frame saved under the top URL, restored after reload, no leak into another doc; exactly one panel per tab; panel click scrolls inside the frame; panel navigation across pages scrolls in the right context; exactly one selection widget |
+
+**The suites are known to catch regressions.** They were checked against deliberate breakage: the pre-OneDrive version fails 5 extension tests; frames keying by `about:srcdoc` fails 5 (including doc1's highlight leaking into doc2); the old restore-timing code fails the local-files suite on .md/.txt. To rerun the extension suite against another copy, set `PO_EXTENSION_DIR=/path/to/copy npm run test:extension`.
+
+- **Manual check on the real thing after a change:** `chrome://extensions` → reload Po → refresh tabs. Highlight with a comment, refresh, open the panel, click an item from another site. On the work Mac, also check an HTML doc open in OneDrive.
+- **Writing tests:** pure logic goes in `test.html` (`test(name, async fn)`, `assert`, `assertEq`). Anything involving frames, the toolbar, navigation or real storage goes in `e2e/extension.mjs` (`highlight(frame, phrase, {comment})`, `spanInfo`, `openPanel`, `clickPanelItem`, `waitForFlash`). Assert the behaviour itself (e.g. "restored span has the comment"), not a stand-in for it.
 
 ## Changing things: where to look
 
@@ -132,5 +147,6 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 | Panel grouping | `groupHighlights()` + `groupKey()` (`file://` → "Local files", otherwise `extractDomain()`) |
 | Restore reliability | `restoreHighlight()`, `findRangeInTextNodes()`, `RESTORE_RETRY_DELAYS` |
 | Toolbar click behaviour | `background.js` |
+| Which frames Po runs in / how frames identify their page | `frameRole()`, `resolveFramePage()`, `currentPageUrl()` in `content.js`; relays in `background.js` |
 
 Possible next steps (not built): export/import highlights as JSON (a backup, since uninstalling wipes data), a highlight-count badge on the icon, a keyboard shortcut to open the panel.

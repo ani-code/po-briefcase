@@ -360,6 +360,25 @@
     assert(!isSupportedDocument(new DOMParser().parseFromString('<svg xmlns="http://www.w3.org/2000/svg"><text>x</text></svg>', 'image/svg+xml')), 'SVG');
   });
 
+  // ---------- frames (OneDrive viewer) ----------
+  test('frameRole: top page, inline viewer frames, and frames Po must ignore', () => {
+    assertEq(frameRole(true, 'https://x.com/'), 'top');
+    assertEq(frameRole(false, 'about:srcdoc'), 'inline', 'OneDrive HTML viewer');
+    assertEq(frameRole(false, 'about:blank'), 'inline');
+    assertEq(frameRole(false, 'data:text/html,hi'), 'inline');
+    assertEq(frameRole(false, 'blob:https://x.com/123'), 'inline');
+    assertEq(frameRole(false, 'https://ads.example/frame'), 'none', 'ads/embeds left alone');
+    assertEq(frameRole(false, 'file:///Users/me/a.html'), 'none');
+  });
+
+  test('top page stores highlights without the inFrame flag', async () => {
+    resetStore();
+    fixture.innerHTML = '<p>Top page flag check.</p>';
+    const saved = await createHighlightOnFixture('flag check', '');
+    assertEq(saved.inFrame, undefined);
+    assertEq(saved.url, currentPageUrl());
+  });
+
   // ---------- colour setup ----------
   test('palette: changing a colour saves it, recolours old highlights, updates the widget', async () => {
     resetStore();
@@ -400,7 +419,7 @@
   test('content.js makes no network calls', async () => {
     const src = await fetch('content.js').then((r) => r.text()).catch(() => null);
     if (src === null) return; // file:// fetch blocked — covered by the grep in CLAUDE.md
-    assert(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket/.test(src), 'network API found in content.js');
+    assert(!/\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource/.test(src), 'network API found in content.js');
   });
 
   (async () => {

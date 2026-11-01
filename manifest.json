@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Po Highlighter",
-  "version": "1.0",
+  "version": "1.1",
   "description": "Highlight text, add comments, and browse every highlight by site. Stored locally in this Chrome profile — no network calls.",
   "icons": {
     "16": "images/po_webhighter_ext.png",
@@ -34,7 +34,9 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": true,
+      "match_origin_as_fallback": true
     }
   ],
   "background": {
