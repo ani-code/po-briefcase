@@ -13,14 +13,17 @@ const UI_HOST_ID = 'hl-ext-root';
 const RUNTIME_PING_EVENT = 'po-carryover:ping';
 const RUNTIME_PONG_ATTR = 'data-po-carryover-pong';
 
+const PALETTE_KEY = 'hlPalette';
 const DEFAULT_PALETTE = ['#9BB4C0', '#FFCDC9', '#FEEAC9', '#F0C1E1'];
 const RESOLVED_COLOR = '#b9f6ca';
 const RESTORE_RETRY_DELAYS = [1000, 2500, 5000, 10000];
+const LOCAL_FILES_GROUP = 'Local files';
 
 let uiHost = null;
 let mutationObserver = null;
 let currentRange = null;
-let selectedColor = DEFAULT_PALETTE[0];
+let userPalette = [...DEFAULT_PALETTE];
+let selectedColor = userPalette[0];
 let colorWidget = null;
 let commentPopup = null;
 let sidePanel = null;
@@ -111,6 +114,64 @@ function removeHighlights(ids) {
   return mutateHighlights((list) => list.filter((h) => !idSet.has(h.id)));
 }
 
+// ---- Palette: 4 user-chosen colours, stored under hlPalette ----
+function isValidPalette(p) {
+  return Array.isArray(p) && p.length === DEFAULT_PALETTE.length && p.every((hex) => /^#[0-9a-f]{6}$/i.test(hex));
+}
+
+async function loadPalette() {
+  try {
+    const result = await storageLocalGet({ [PALETTE_KEY]: null });
+    if (isValidPalette(result[PALETTE_KEY])) userPalette = result[PALETTE_KEY];
+  } catch { /* storage unavailable — keep defaults */ }
+  selectedColor = userPalette[0];
+}
+
+/**
+ * Replace palette slot `slot` with `newHex`. Existing highlights painted with the old
+ * slot colour are recoloured too, so changing a colour you dislike changes it everywhere.
+ */
+async function setPaletteColor(slot, newHex) {
+  const oldHex = userPalette[slot];
+  if (!/^#[0-9a-f]{6}$/i.test(newHex) || oldHex.toLowerCase() === newHex.toLowerCase()) return;
+  const next = [...userPalette];
+  next[slot] = newHex;
+  await savePalette(next, { [oldHex.toLowerCase()]: newHex });
+}
+
+async function resetPalette() {
+  const recolor = {};
+  userPalette.forEach((hex, i) => { recolor[hex.toLowerCase()] = DEFAULT_PALETTE[i]; });
+  await savePalette([...DEFAULT_PALETTE], recolor);
+}
+
+async function savePalette(next, recolor) {
+  if (selectedColor && recolor[selectedColor.toLowerCase()]) selectedColor = recolor[selectedColor.toLowerCase()];
+  userPalette = next;
+  try {
+    await storageLocalSet({ [PALETTE_KEY]: next });
+    await mutateHighlights((list) => list.map((h) => {
+      const to = h.color && recolor[h.color.toLowerCase()];
+      return to ? { ...h, color: to } : h;
+    }));
+  } catch (error) {
+    console.error('[Po] palette save failed:', error);
+  }
+  // Repaint this page's spans that used a replaced colour
+  document.querySelectorAll('span.my-extension-highlight:not(.resolved)').forEach((span) => {
+    const current = rgbToHex(span.style.backgroundColor);
+    if (current && recolor[current]) span.style.setProperty('background-color', recolor[current], 'important');
+  });
+  renderPaletteEditor();
+  if (panelOpen) refreshSidePanel();
+}
+
+function rgbToHex(rgb) {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(rgb || '');
+  if (!m) return null;
+  return '#' + [m[1], m[2], m[3]].map((n) => Number(n).toString(16).padStart(2, '0')).join('');
+}
+
 // Highlights belong to a page, not a scroll position — ignore #fragment when matching.
 function pageKey(url) {
   try {
@@ -167,6 +228,7 @@ async function init() {
   const host = getUiHost();
   if (!host) return;
 
+  await loadPalette();
   mountUi();
   if (!globalListenersAttached) {
     attachGlobalListeners();
@@ -265,8 +327,13 @@ function onRuntimeMessage(msg) {
 
 // Another tab added/edited/deleted a highlight — keep an open panel current.
 function onStorageChanged(changes, areaName) {
-  if (areaName !== 'local' || !changes[STORAGE_KEY]) return;
-  if (panelOpen) refreshSidePanel();
+  if (areaName !== 'local') return;
+  if (changes[PALETTE_KEY] && isValidPalette(changes[PALETTE_KEY].newValue)) {
+    userPalette = changes[PALETTE_KEY].newValue;
+    if (!userPalette.includes(selectedColor)) selectedColor = userPalette[0];
+    renderPaletteEditor();
+  }
+  if (changes[STORAGE_KEY] && panelOpen) refreshSidePanel();
 }
 
 // ============================================================
@@ -331,6 +398,7 @@ function showColorWidget(range) {
   const rect = range.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return;
 
+  if (!userPalette.includes(selectedColor)) selectedColor = userPalette[0];
   colorWidget.innerHTML = buildWidgetHTML();
 
   const top = window.scrollY + rect.bottom + 8;
@@ -365,7 +433,7 @@ function showColorWidget(range) {
 }
 
 function buildWidgetHTML() {
-  const swatchesHTML = DEFAULT_PALETTE.map(hex =>
+  const swatchesHTML = userPalette.map(hex =>
     `<div class="hl-swatch" data-color="${hex}" title="${hex}" style="background:${hex}"></div>`
   ).join('');
   return `
@@ -773,6 +841,12 @@ function scrollIfPending(id) {
   scrollToHighlight(id);
 }
 
+function isLocalFile(url) {
+  return String(url || '').startsWith('file:');
+}
+
+// Navigation goes through background.js (chrome.tabs.update): a web page is not allowed
+// to open file:// URLs itself, but the extension is (once file access is allowed).
 async function openHighlight(id, url) {
   if (pageKey(url) === pageKey(window.location.href)) {
     scrollToHighlight(id);
@@ -781,7 +855,32 @@ async function openHighlight(id, url) {
   try {
     await storageLocalSet({ [PENDING_SCROLL_KEY]: { id, url, at: Date.now() } });
   } catch { /* navigate anyway; just no auto-scroll */ }
-  window.location.href = url;
+
+  let response = null;
+  try {
+    response = await chrome.runtime.sendMessage({ type: 'OPEN_URL', url });
+  } catch (error) {
+    response = { ok: false, error: error?.message || 'background unavailable' };
+  }
+  if (response?.ok) return;
+
+  if (!isLocalFile(url)) {
+    window.location.href = url;
+    return;
+  }
+  console.warn('[Po] could not open local file:', response?.error);
+  showPanelNotice(response?.error === 'file_access_off'
+    ? 'To open local files, go to chrome://extensions → Po Highlighter → Details and turn on “Allow access to file URLs”.'
+    : 'Could not open that file. It may have been moved or renamed.');
+}
+
+function showPanelNotice(message) {
+  const notice = document.getElementById('hl-panel-notice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.style.display = 'block';
+  clearTimeout(showPanelNotice.timer);
+  showPanelNotice.timer = setTimeout(() => { notice.style.display = 'none'; }, 8000);
 }
 
 // ============================================================
@@ -802,9 +901,14 @@ function buildSidePanel() {
         <button class="hl-btn-icon" id="hl-panel-close" title="Close">✕</button>
       </div>
     </div>
-    <div class="hl-panel-search-wrap">
-      <input class="hl-panel-search" id="hl-panel-search" placeholder="Search text, comment or site…" autocomplete="off"/>
+    <div class="hl-panel-palette-wrap">
+      <div class="hl-palette-header">Highlight colours <span class="hl-palette-hint">click a colour to change it</span></div>
+      <div class="hl-palette-slots" id="hl-palette-slots"></div>
     </div>
+    <div class="hl-panel-search-wrap">
+      <input class="hl-panel-search" id="hl-panel-search" placeholder="Search text, comment, site or file…" autocomplete="off"/>
+    </div>
+    <div class="hl-panel-notice" id="hl-panel-notice" role="status"></div>
     <div class="hl-panel-body" id="hl-panel-body">
       <p class="hl-panel-empty">No highlights yet.<br>Select text on any page to begin.</p>
     </div>
@@ -846,6 +950,33 @@ function buildSidePanel() {
   sidePanel.querySelector('#hl-panel-search').addEventListener('input', (e) => {
     filterPanel(e.target.value.trim().toLowerCase());
   });
+
+  renderPaletteEditor();
+}
+
+function renderPaletteEditor() {
+  const container = document.getElementById('hl-palette-slots');
+  if (!container) return;
+  const isDefault = userPalette.every((hex, i) => hex.toLowerCase() === DEFAULT_PALETTE[i].toLowerCase());
+  container.innerHTML = `
+    ${userPalette.map((hex, i) => `
+      <label class="hl-palette-slot" title="Colour ${i + 1}: ${hex}">
+        <input type="color" class="hl-palette-color" data-slot="${i}" value="${hex.toLowerCase()}"/>
+        <span class="hl-palette-swatch" style="background:${hex}"></span>
+      </label>
+    `).join('')}
+    <button class="hl-palette-reset" id="hl-palette-reset" type="button" ${isDefault ? 'disabled' : ''}>Reset</button>
+  `;
+  container.querySelectorAll('.hl-palette-color').forEach((input) => {
+    // Live preview while dragging in the picker; persist on commit
+    input.addEventListener('input', () => {
+      input.nextElementSibling.style.background = input.value;
+    });
+    input.addEventListener('change', () => {
+      setPaletteColor(Number(input.dataset.slot), input.value);
+    });
+  });
+  container.querySelector('#hl-palette-reset').addEventListener('click', () => resetPalette());
 }
 
 function updatePanelState() {
@@ -861,15 +992,28 @@ function updatePanelState() {
   }
 }
 
+/** Panel group for a URL: hostname incl. subdomain, or one shared group for all file:// pages. */
+function groupKey(url) {
+  return isLocalFile(url) ? LOCAL_FILES_GROUP : extractDomain(url);
+}
+
+/** "zara-flow-v2.html" from file:///Users/me/Docs/zara-flow-v2.html */
+function fileName(url) {
+  try {
+    const path = decodeURIComponent(new URL(url).pathname);
+    return path.split('/').filter(Boolean).pop() || path;
+  } catch { return url; }
+}
+
 /**
- * Group highlights for the panel: site (hostname incl. subdomain) → time bucket, newest first.
- * Returns [{ domain, items, buckets: [{ label, order, items }] }].
+ * Group highlights for the panel: site (hostname incl. subdomain) or "Local files" → time bucket,
+ * newest first. Returns [{ domain, items, buckets: [{ label, order, items }] }].
  */
 function groupHighlights(highlights) {
   const sorted = [...highlights].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const byDomain = new Map();
   sorted.forEach(h => {
-    const domain = extractDomain(h.url);
+    const domain = groupKey(h.url);
     if (!byDomain.has(domain)) byDomain.set(domain, []);
     byDomain.get(domain).push(h);
   });
@@ -904,7 +1048,7 @@ function refreshSidePanel() {
       return;
     }
 
-    const currentDomain = extractDomain(window.location.href);
+    const currentDomain = groupKey(window.location.href);
     // Open the current site's group by default the first time the panel renders it
     if (!expandedDomains.has('__init__')) {
       expandedDomains.add('__init__');
@@ -919,7 +1063,7 @@ function refreshSidePanel() {
         <div class="hl-panel-group" data-domain="${escapeHtml(domain)}">
           <div class="hl-panel-group-header" data-domain-key="${escapeHtml(domain)}" data-target="${domainId}">
             <span class="hl-group-chevron">${expandedDomains.has(domain) ? '▾' : '▸'}</span>
-            <span class="hl-group-domain">${escapeHtml(domain)}</span>
+            <span class="hl-group-domain">${domain === LOCAL_FILES_GROUP ? '📄 ' : ''}${escapeHtml(domain)}</span>
             <span class="hl-group-count">${items.length}</span>
             ${domain === currentDomain ? '<span class="hl-current-badge">current</span>' : ''}
             <button class="hl-group-delete" data-delete-domain="${escapeHtml(domain)}" title="Delete all highlights for ${escapeHtml(domain)}">✕</button>
@@ -1003,7 +1147,7 @@ function refreshSidePanel() {
         e.stopPropagation();
         const domain = btn.dataset.deleteDomain;
         if (!window.confirm(`Delete all highlights for ${domain}?`)) return;
-        deleteGroupHighlights(h => extractDomain(h.url) === domain, () => {
+        deleteGroupHighlights(h => groupKey(h.url) === domain, () => {
           expandedDomains.delete(domain);
         });
       });
@@ -1017,7 +1161,7 @@ function refreshSidePanel() {
         const bucket = btn.dataset.deleteBucket;
         if (!window.confirm(`Delete all ${domain} highlights from "${bucket}"?`)) return;
         deleteGroupHighlights(
-          h => extractDomain(h.url) === domain && timeBucket(h.timestamp).label === bucket,
+          h => groupKey(h.url) === domain && timeBucket(h.timestamp).label === bucket,
           () => { expandedBuckets.delete('collapsed::' + domain + '::' + bucket); }
         );
       });
@@ -1037,22 +1181,26 @@ function buildPanelItem(data) {
   const comment = data.comment ? truncate(data.comment, 90) : '';
   const age = relativeTime(data.timestamp);
   const color = data.resolved ? RESOLVED_COLOR : (data.color || DEFAULT_PALETTE[0]);
-  const searchText = `${data.text} ${data.comment || ''} ${data.pageTitle || ''}`.toLowerCase();
+  const local = isLocalFile(data.url);
+  // Local files share one group, so each item names its file; web items show the page title
+  const source = local ? `📄 ${fileName(data.url)}` : (data.pageTitle || '');
+  const tooltip = local ? safeDecode(pageKey(data.url).replace(/^file:\/\//, '')) : (data.pageTitle || data.url);
+  const searchText = `${data.text} ${data.comment || ''} ${data.pageTitle || ''} ${local ? fileName(data.url) : ''}`.toLowerCase();
 
   return `
     <div class="hl-panel-item ${data.resolved ? 'hl-item-resolved' : ''}"
          data-id="${escapeHtml(data.id)}"
          data-url="${escapeHtml(data.url)}"
          data-text="${escapeHtml(searchText)}"
-         data-domain="${escapeHtml(extractDomain(data.url))}"
-         title="${escapeHtml(data.pageTitle || data.url)}">
+         data-domain="${escapeHtml(groupKey(data.url))}"
+         title="${escapeHtml(tooltip)}">
       <div class="hl-item-dot" style="background:${escapeHtml(color)}"></div>
       <div class="hl-item-content">
         <p class="hl-item-text">${escapeHtml(snippet)}</p>
         ${comment ? `<p class="hl-item-comment">💬 ${escapeHtml(comment)}</p>` : ''}
         <div class="hl-item-footer">
           <span class="hl-item-ts">${age}</span>
-          <span class="hl-item-page">${escapeHtml(truncate(data.pageTitle || '', 40))}</span>
+          <span class="hl-item-page">${escapeHtml(truncate(source, 40))}</span>
           <span class="hl-item-footer-spacer"></span>
           <button class="hl-item-delete" title="Delete highlight">✕</button>
         </div>
@@ -1140,6 +1288,10 @@ function relativeTime(iso) {
     const months = Math.round(diffMonths % 12);
     return months > 0 ? `${years} yr ${months} mo ago` : `${years} yr ago`;
   } catch { return ''; }
+}
+
+function safeDecode(str) {
+  try { return decodeURIComponent(str); } catch { return str; }
 }
 
 function truncate(str, len) {

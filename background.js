@@ -1,5 +1,6 @@
 // Po Highlighter — service worker.
-// Its only job: toolbar icon click → toggle the side panel in the active tab.
+// 1. Toolbar icon click → toggle the side panel in the active tab.
+// 2. OPEN_URL from the panel → navigate that tab (web pages can't open file:// themselves).
 // There are no network calls anywhere in this extension.
 
 const RESTRICTED_URL_RE = /^(chrome|chrome-extension|chrome-search|devtools|edge|about|view-source):/;
@@ -26,3 +27,24 @@ chrome.action.onClicked.addListener(async (tab) => {
     console.warn('[Po] Could not open panel on this tab — refresh the page and try again:', error?.message);
   }
 });
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== 'OPEN_URL') return;
+  openUrlInTab(msg.url, sender.tab?.id).then(sendResponse);
+  return true; // async response
+});
+
+async function openUrlInTab(url, tabId) {
+  if (!/^(https?|file):/.test(String(url || ''))) return { ok: false, error: 'unsupported_url' };
+  if (url.startsWith('file:') && !(await chrome.extension.isAllowedFileSchemeAccess())) {
+    return { ok: false, error: 'file_access_off' };
+  }
+  try {
+    if (tabId) await chrome.tabs.update(tabId, { url });
+    else await chrome.tabs.create({ url });
+    return { ok: true };
+  } catch (error) {
+    console.warn('[Po] open failed:', url, error?.message);
+    return { ok: false, error: error?.message || 'open_failed' };
+  }
+}

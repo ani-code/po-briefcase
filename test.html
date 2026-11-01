@@ -28,8 +28,14 @@
 <script>
   // In-memory chrome.storage.local stand-in. No runtime.id, so content.js does not bootstrap.
   const memStore = {};
+  const sentMessages = [];
+  let nextBackgroundResponse = { ok: true };
   const mockChrome = {
-    runtime: { lastError: undefined, getURL: (p) => p },
+    runtime: {
+      lastError: undefined,
+      getURL: (p) => p,
+      sendMessage: (msg) => { sentMessages.push(msg); return Promise.resolve(nextBackgroundResponse); },
+    },
     storage: {
       local: {
         get(defaults, cb) {
@@ -270,6 +276,103 @@
     assertEq(pendingScrollId, 'zz', 'this page: picked up');
     assertEq(memStore[PENDING_SCROLL_KEY], null, 'cleared after use');
     pendingScrollId = null;
+  });
+
+  // ---------- local files ----------
+  test('groupKey: every file:// page shares "Local files"; web keeps hostname', () => {
+    assertEq(groupKey('file:///Users/me/a.html'), 'Local files');
+    assertEq(groupKey('file:///Users/me/docs/b.html#x'), 'Local files');
+    assertEq(groupKey('https://docs.github.com/x'), 'docs.github.com');
+    const groups = groupHighlights([
+      { id: '1', url: 'file:///Users/me/a.html', timestamp: new Date().toISOString() },
+      { id: '2', url: 'file:///Users/me/docs/b.html', timestamp: new Date().toISOString() },
+      { id: '3', url: 'https://github.com/', timestamp: new Date().toISOString() },
+    ]);
+    assertEq(groups.map((g) => g.domain).sort().join(','), 'Local files,github.com');
+    assertEq(groups.find((g) => g.domain === 'Local files').items.length, 2);
+  });
+
+  test('fileName decodes spaces and drops the folder', () => {
+    assertEq(fileName('file:///Users/me/My%20Docs/flow%20v2.html'), 'flow v2.html');
+  });
+
+  test('panel: local file item sits under Local files and names its file', async () => {
+    resetStore();
+    const now = new Date().toISOString();
+    await addHighlight({ id: 'f1', url: 'file:///Users/me/Docs/zara%20flow.html', pageTitle: 'Zara flow', text: 'local text', comment: 'local note', color: '#9BB4C0', timestamp: now });
+    await addHighlight({ id: 'w1', url: 'https://github.com/y', pageTitle: 'GH', text: 'web text', comment: '', color: '#9BB4C0', timestamp: now });
+    refreshSidePanel();
+    await sleep(50);
+    const item = document.querySelector('.hl-panel-item[data-id="f1"]');
+    assertEq(item.closest('.hl-panel-group').dataset.domain, 'Local files');
+    assert(item.querySelector('.hl-item-page').textContent.includes('📄 zara flow.html'), 'file name shown');
+    assertEq(item.title, '/Users/me/Docs/zara flow.html', 'full path on hover');
+    filterPanel('zara flow');
+    assertEq(item.style.display, '', 'searchable by file name');
+    assertEq(document.querySelector('.hl-panel-item[data-id="w1"]').style.display, 'none');
+    filterPanel('');
+  });
+
+  test('openHighlight: a local file opens via background.js and queues the scroll', async () => {
+    resetStore();
+    sentMessages.length = 0;
+    nextBackgroundResponse = { ok: true };
+    const target = 'file:///Users/me/Docs/other.html';
+    const before = window.location.href;
+    await openHighlight('f1', target);
+    assertEq(sentMessages.length, 1);
+    assertEq(sentMessages[0].type, 'OPEN_URL');
+    assertEq(sentMessages[0].url, target);
+    assertEq(memStore[PENDING_SCROLL_KEY].id, 'f1');
+    assertEq(window.location.href, before, 'page itself did not navigate');
+  });
+
+  test('openHighlight: file access off → visible notice, no navigation', async () => {
+    resetStore();
+    nextBackgroundResponse = { ok: false, error: 'file_access_off' };
+    const before = window.location.href;
+    await openHighlight('f1', 'file:///Users/me/Docs/other.html');
+    const notice = document.getElementById('hl-panel-notice');
+    assertEq(notice.style.display, 'block');
+    assert(notice.textContent.includes('Allow access to file URLs'), 'tells you what to turn on');
+    assertEq(window.location.href, before);
+    nextBackgroundResponse = { ok: true };
+  });
+
+  // ---------- colour setup ----------
+  test('palette: changing a colour saves it, recolours old highlights, updates the widget', async () => {
+    resetStore();
+    await loadPalette();
+    const oldHex = userPalette[1];
+    fixture.innerHTML = '<p>Recolour this sentence.</p>';
+    const saved = await createHighlightOnFixture('Recolour this', '');   // uses slot 1
+    assertEq(saved.color, oldHex);
+    await addHighlight({ id: 'other', url: 'https://x.com', text: 't', color: userPalette[2], timestamp: new Date().toISOString() });
+
+    await setPaletteColor(1, '#123456');
+    assertEq(userPalette[1], '#123456');
+    assertEq(memStore[PALETTE_KEY][1], '#123456', 'persisted');
+    const all = await getAllHighlights();
+    assertEq(all.find((h) => h.id === saved.id).color, '#123456', 'stored highlight recoloured');
+    assertEq(all.find((h) => h.id === 'other').color, DEFAULT_PALETTE[2], 'other slot untouched');
+    assertEq(rgbToHex(spansFor(saved.id)[0].style.backgroundColor), '#123456', 'span on page repainted');
+    assert(buildWidgetHTML().includes('data-color="#123456"'), 'widget offers new colour');
+    assert(document.querySelector('.hl-palette-color[data-slot="1"]').value === '#123456', 'editor shows new colour');
+  });
+
+  test('palette: reset restores defaults and recolours back', async () => {
+    await resetPalette();
+    assertEq(userPalette.join(','), DEFAULT_PALETTE.join(','));
+    const all = await getAllHighlights();
+    assert(all.every((h) => DEFAULT_PALETTE.includes(h.color)), 'all highlights back on default colours');
+    assert(document.getElementById('hl-palette-reset').disabled, 'reset disabled at defaults');
+  });
+
+  test('palette: invalid stored palette falls back to defaults', async () => {
+    resetStore();
+    memStore[PALETTE_KEY] = ['#fff', 'red'];
+    await loadPalette();
+    assertEq(userPalette.join(','), DEFAULT_PALETTE.join(','));
   });
 
   // ---------- guardrail ----------

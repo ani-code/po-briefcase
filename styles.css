@@ -615,6 +615,102 @@
   font-size: 11px;
 }
 
+/* ---- Palette editor (panel) ---- */
+.hl-panel-palette-wrap {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--hl-line);
+}
+
+.hl-palette-header {
+  margin-bottom: 10px;
+  color: var(--hl-muted-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.hl-palette-hint {
+  margin-left: 6px;
+  color: var(--hl-muted-2);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.hl-palette-slots {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hl-palette-slot {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Native colour input stays clickable but invisible; the swatch is what you see */
+.hl-palette-color {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+  padding: 0;
+}
+
+.hl-palette-swatch {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  border: 2px solid rgba(0,0,0,0.08);
+  box-sizing: border-box;
+  pointer-events: none;
+  transition: transform 0.15s;
+}
+
+.hl-palette-slot:hover .hl-palette-swatch {
+  transform: scale(1.1);
+  border-color: var(--hl-line-strong);
+}
+
+.hl-palette-reset {
+  margin-left: auto;
+  padding: 6px 12px;
+  border: 1px solid var(--hl-line-strong);
+  border-radius: 999px;
+  background: var(--hl-surface);
+  color: var(--hl-accent);
+  font-family: var(--hl-font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hl-palette-reset:disabled {
+  color: var(--hl-muted-2);
+  cursor: default;
+}
+
+/* ---- Panel notice (e.g. file access off) ---- */
+.hl-panel-notice {
+  display: none;
+  margin: 12px 20px 0;
+  padding: 10px 12px;
+  border-radius: var(--hl-radius-sm);
+  background: var(--hl-warn-bg);
+  border: 1px solid rgba(183,121,31,0.16);
+  color: var(--hl-warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* Responsive */
 @media (max-width: 820px) {
   .hl-ext-panel {

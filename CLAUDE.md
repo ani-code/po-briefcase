@@ -26,13 +26,14 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 | View a comment | Click any highlighted text on the page. Hovering also shows the comment as a tooltip |
 | Edit / delete / resolve | Click the highlight, then ✏ / 🗑 / **Resolve ✓** (resolved highlights turn green; **Reopen** undoes it) |
 | Open the panel | Click the extension's toolbar icon. Click again or ✕ to close |
-| Panel layout | Grouped by **site (hostname incl. subdomain)**, so `docs.github.com` and `github.com` are separate groups, then by time (Today / Yesterday / This week / This month / Older), newest first. The current site's group opens by default |
-| Open a highlight | Click it in the panel. If it's on another page, that page opens in this tab and scrolls to the highlight (flashes green) once it's restored |
-| Search | Panel search box filters by highlighted text, comment, page title or site |
+| Panel layout | Grouped by **site (hostname incl. subdomain)**, so `docs.github.com` and `github.com` are separate groups. **Every local `file://` page shares one 📄 Local files group**, and each item shows its file name (full path on hover). Then by time (Today / Yesterday / This week / This month / Older), newest first. The current site's group opens by default |
+| Open a highlight | Click it in the panel. If it's on another page or a local file, it opens in this tab and scrolls to the highlight (flashes green) once it's restored. Opening goes through `background.js` (`chrome.tabs.update`) because a web page isn't allowed to open `file://` URLs itself |
+| Choose colours | Panel → **Highlight colours** → click a circle to open the colour picker. Changing a colour also **recolours every existing highlight that used it**. **Reset** goes back to the defaults |
+| Search | Panel search box filters by highlighted text, comment, page title, site or file name |
 | Bulk delete | Hover a site or time header and click ✕ (asks for confirmation) |
 | Resize panel | Drag its left edge (320–720px) |
 
-**Not included (on purpose):** Zara sync, page scrape, image snip/OCR, chat-with-page, YouTube transcripts, options page, diagnostics, custom palette editor.
+**Not included (on purpose):** Zara sync, page scrape, image snip/OCR, chat-with-page, YouTube transcripts, options page, diagnostics.
 
 ---
 
@@ -43,7 +44,7 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
 |---|---|
 | `manifest.json` | MV3. Permissions: `storage`, `activeTab`, `scripting`. **No `host_permissions`.** The content script runs on `<all_urls>` |
 | `content.js` | Everything: selection widget, comment popup, highlight wrap/restore, side panel, storage helpers. Bootstrap is at the **bottom** of the file |
-| `background.js` | Service worker. Toolbar icon click sends `TOGGLE_PANEL` to the tab. If the tab has no live content script (opened before install or reload), it injects `styles.css` + `content.js` via `activeTab`, then toggles |
+| `background.js` | Service worker. (1) `OPEN_URL` from the panel → `chrome.tabs.update` on that tab. Returns `file_access_off` if a `file://` URL is requested without file access, and the panel shows a notice. (2) Toolbar icon click sends `TOGGLE_PANEL` to the tab. If the tab has no live content script (opened before install or reload), it injects `styles.css` + `content.js` via `activeTab`, then toggles |
 | `styles.css` | Po's styles trimmed to spans, widget, popup and panel (sage `#2d7d5e` accent, light UI) |
 | `test.html` | In-browser test suite against the real `content.js` (see Testing) |
 | `images/po_webhighter_ext.png` | Icon |
@@ -53,6 +54,7 @@ A Chrome extension (Manifest V3) for **highlighting text on any web page, attach
   ```js
   { id, url, pageTitle, text, xpath, color, comment, resolved, timestamp /* ISO */, isMultiSpan }
   ```
+- Key `hlPalette` holds 4 hex colours (defaults to `DEFAULT_PALETTE`; invalid values fall back to defaults). Each highlight stores its own `color`, so changing a palette slot rewrites `color` on highlights that used the old hex (`savePalette()`).
 - Key `pendingScroll` is `{ id, url, at }`. It is set when you click a panel item that lives on another page. The destination page picks it up after load, scrolls to the highlight, then clears it. It expires after 30 seconds.
 - All writes go through `mutateHighlights()`, which serializes read-modify-write within a tab so rapid edits don't overwrite each other.
 - `chrome.storage.onChanged` refreshes an open panel when another tab changes highlights.
@@ -80,7 +82,7 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 2. **Load unpacked** → select the cloned folder.
 3. Pin the icon (puzzle-piece menu → pin).
 4. Refresh any tabs that were already open.
-5. Optional: to highlight local files (`file://`), open the extension's **Details** and enable **Allow access to file URLs**.
+5. **For local HTML files (`file://`)**: open the extension's **Details** and turn on **Allow access to file URLs**. Without it the extension doesn't run on local files, and the panel can't open them. Extensions can't turn this on themselves.
 
 **Work laptop caveat:** if Chrome is company-managed, policy can block Developer mode or unpacked extensions. If **Load unpacked** is missing or greyed out, check `chrome://policy` (look for `ExtensionInstallBlocklist`, `ExtensionAllowedTypes` or `DeveloperToolsAvailability`). That's an IT setting, not a bug here.
 
@@ -90,7 +92,7 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 
 ## Testing
 
-- **Automated:** open `test.html` in Chrome and it runs automatically. Expect **21/21 passed**. It loads the real `content.js` (nothing is copied into the test) with an in-memory `chrome.storage`, and covers: `pageKey`, `extractDomain`, grouping by subdomain and time, text matching (single node, across elements, nbsp, miss), wrap/unwrap round-trip, storage add/update/remove plus concurrent writes, **refresh restore** (comment, colour, `#fragment`, resolved state, late-rendered content via retry), delete, edit, panel rendering and search, and pending-scroll targeting.
+- **Automated:** open `test.html` in Chrome and it runs automatically. Expect **29/29 passed**. It loads the real `content.js` (nothing is copied into the test) with an in-memory `chrome.storage`, and covers: `pageKey`, `extractDomain`, grouping by subdomain and time, text matching (single node, across elements, nbsp, miss), wrap/unwrap round-trip, storage add/update/remove plus concurrent writes, **refresh restore** (comment, colour, `#fragment`, resolved state, late-rendered content via retry), delete, edit, panel rendering and search, pending-scroll targeting, the **Local files** group (grouping, file name, search, opening via the background with the scroll queued, file-access-off notice) and **colours** (save, recolour existing highlights and on-page spans, reset, invalid stored palette).
 - **Headless run** (no clicking):
   ```bash
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu \
@@ -110,9 +112,9 @@ Repo: `https://github.com/ani-code/po-briefcase` (**public**: never commit highl
 
 | Want to change… | Go to |
 |---|---|
-| Highlight colours | `DEFAULT_PALETTE` at the top of `content.js` |
+| Highlight colours | Users pick them in the panel. Defaults are `DEFAULT_PALETTE` at the top of `content.js`; editor is `renderPaletteEditor()` / `setPaletteColor()` |
 | Widget / popup look | `styles.css` → COLOR WIDGET / COMMENT POPUP |
-| Panel grouping | `groupHighlights()` + `extractDomain()` (switch to the registrable domain there if subdomains should merge) |
+| Panel grouping | `groupHighlights()` + `groupKey()` (`file://` → "Local files", otherwise `extractDomain()`) |
 | Restore reliability | `restoreHighlight()`, `findRangeInTextNodes()`, `RESTORE_RETRY_DELAYS` |
 | Toolbar click behaviour | `background.js` |
 
